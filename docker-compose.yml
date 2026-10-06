@@ -1,0 +1,70 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ewaste
+      POSTGRES_PASSWORD: ewaste
+      POSTGRES_DB: ewaste
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ewaste"]
+      interval: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    environment:
+      # The default "guest" user can only connect from localhost inside the
+      # container, so we create our own user for the other containers.
+      RABBITMQ_DEFAULT_USER: ewaste
+      RABBITMQ_DEFAULT_PASS: ewaste
+    ports:
+      - "15672:15672"   # management UI: http://localhost:15672 (ewaste/ewaste)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      retries: 30
+
+  auth:
+    build: ./services/auth
+    environment:
+      DATABASE_URL: postgres://ewaste:ewaste@postgres:5432/ewaste
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  pickup:
+    build: ./services/pickup
+    environment:
+      DATABASE_URL: postgres://ewaste:ewaste@postgres:5432/ewaste
+      RABBITMQ_URL: amqp://ewaste:ewaste@rabbitmq:5672
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  notification:
+    build: ./services/notification
+    environment:
+      DATABASE_URL: postgres://ewaste:ewaste@postgres:5432/ewaste
+      RABBITMQ_URL: amqp://ewaste:ewaste@rabbitmq:5672
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:team@example.com}
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  web:
+    build: ./web
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "8080:80"
+    environment:
+      WEB_UPSTREAM: ${WEB_UPSTREAM:-web:3000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # lets Caddy reach `npm run dev` on your machine
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on: [auth, pickup, notification]

@@ -1,0 +1,11 @@
+{
+  "name": "pickup-service",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "amqplib": "^2.2.0",
+    "express": "^5.2.1",
+    "pg": "^8.23.1"
+  }
+}

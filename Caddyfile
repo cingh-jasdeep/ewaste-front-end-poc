@@ -1,0 +1,49 @@
+# Plain HTTP on localhost for development. Browsers treat localhost as a
+# secure context, so service workers and push still work.
+{
+	auto_https off
+}
+
+# Shared auth check: strip any client-sent X-User-Id, ask the auth service
+# to verify the session cookie, then copy its X-User-Id onto the request.
+# "route" keeps these in the written order. Without it, Caddy's default
+# directive order runs forward_auth BEFORE request_header, which would strip
+# the header we just copied in.
+(authed) {
+	route {
+		request_header -X-User-Id
+		forward_auth auth:4000 {
+			uri /verify
+			copy_headers X-User-Id
+		}
+	}
+}
+
+:80 {
+	# Login/logout: public
+	handle /auth/* {
+		reverse_proxy auth:4000
+	}
+
+	# SSE stream + push subscription -> notification service
+	handle /api/events {
+		import authed
+		reverse_proxy notification:5000
+	}
+	handle /api/push/* {
+		import authed
+		reverse_proxy notification:5000
+	}
+
+	# All other API calls (reads + actions) -> pickup service
+	handle /api/* {
+		import authed
+		reverse_proxy pickup:4001
+	}
+
+	# Everything else -> Next.js. Override WEB_UPSTREAM to point at a local
+	# `npm run dev` server instead (see README, "Frontend dev mode").
+	handle {
+		reverse_proxy {$WEB_UPSTREAM:web:3000}
+	}
+}
