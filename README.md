@@ -107,3 +107,4 @@ browser and internet access to the push services). Try the demo script above.
 - **Single notification instance:** the SSE connection map lives in memory.
 - **Production:** replace `:80` + `auto_https off` in the Caddyfile with your
   domain name to get automatic HTTPS and HTTP/2 on the Oracle VM.
+- For the real app, **set a TTL (time to live) on each push**. Delayed delivery isn't just a quirk: by default, a "new pickup available" alert could reach a volunteer hours later, after someone else accepted it. web-push lets you set a TTL so the push service drops a message once it's stale. Keep this short for time-sensitive events like new requests, and longer for things like "your pickup was accepted.
