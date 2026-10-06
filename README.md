@@ -111,3 +111,4 @@ browser and internet access to the push services). Try the demo script above.
   - **Push Status** - check on page load:
 whether notification permission is already granted, and
 whether the service worker already has a subscription, using pushManager.getSubscription().
+  - **Known Limitation** - Firefox desktop doesn't open a new window from push notification click, when no windows are open.
