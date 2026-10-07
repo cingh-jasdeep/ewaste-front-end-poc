@@ -90,8 +90,6 @@ Run end to end (Postgres, RabbitMQ, Caddy and all services) before handoff:
   endpoint (a local stand-in for Google/Mozilla/Apple).
 - `next build` succeeds; the manifest is served at `/manifest.webmanifest`.
 
-Not verified here: a real browser receiving the notification (needs a real
-browser and internet access to the push services). Try the demo script above.
 
 ## Deliberately mocked or simplified
 
