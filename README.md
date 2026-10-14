@@ -1,5 +1,6 @@
 # E-waste Pickup: event flow proof of concept
-[Ecosystem_Final_UI_Approved_Facility_Dropdown.pdf](https://github.com/user-attachments/files/33460201/Ecosystem_Final_UI_Approved_Facility_Dropdown.pdf)
+<img width="1360" height="1100" alt="ewaste-event-flow" src="https://github.com/user-attachments/assets/01d3d65f-27e1-4fcc-8c27-268afe8dff3a" />
+
 
 A deliberately minimal codebase that validates the architecture in the
 "E-waste event flow" diagram. Payloads are mocked; the point is that every hop
