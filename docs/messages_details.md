@@ -7,13 +7,15 @@ Conventions
 - Roles live in Firebase custom claims: `{ roles: ["resident"] | ["volunteer"] | ["resident","volunteer"] }`.
 - No street address ever appears in events, SSE messages, push payloads, or volunteer listings.
 - Each service writes only its own tables. `profiles` is seeded and read-only for Oct 28.
+- One Postgres instance with a schema per service: `pickup` (profiles, categories, requests, windows, status changes, outbox) and `notification` (notifications, processed events, push subscriptions). Each service connects with its own DB user that is granted access only to its own schema, so neither can read the other's tables. `profiles` is seeded and read-only for Oct 28.
+- Caddy is the gateway and the only publicly exposed service. It serves the Next.js frontend and `/api/*` on one origin. A dedicated auth service is the only backend component that talks to Firebase.
 
 ## 1. Setup (manual, one time)
 
 | # | From → To | Mechanism | Input | Output | Notes |
 |---|---|---|---|---|---|
 | 1.1 | Admin script → Firebase Auth | Admin SDK `setCustomUserClaims(uid, claims)` | `uid`, `{ roles: [...] }` | Claims stored on user | New claims reach the frontend on the next token refresh (automatic within ~1 h). To apply immediately, call `currentUser.getIdToken(true)`, then `POST /api/session` again so the session cookie carries the new claims too |
-| 1.2 | Seed script → Postgres | SQL insert | Profiles keyed by Firebase UID (address, postal code, volunteer preferred postal codes), item categories with standard weight | Seeded rows | Replaces registration for Oct 28 |
+| 1.2 | Seed script → Postgres | SQL, run as an admin user | Creates both schemas and the two service users with their grants; seeds profiles (address, postal code, volunteer preferred postal codes) and item categories with standard weight into the `pickup` schema | Seeded rows | Replaces registration for Oct 28 |
 | 1.3 | Setup → Notification service config | Env vars | VAPID key pair (generated once with the web-push library) | Ready to send push | VAPID keys identify our server to browser push services. Private key stays in the notification service env; public key goes to the frontend as `NEXT_PUBLIC_VAPID_KEY` for `pushManager.subscribe()` |
 
 ## 2. Frontend ↔ Firebase Auth (client SDK)
@@ -29,35 +31,38 @@ Conventions
 
 | # | Method + path | Auth | Request | Success response | Errors | Routed to | Notes |
 |---|---|---|---|---|---|---|---|
-| 3.1 | `POST /api/session` | Bearer ID token | `{ idToken }` | `204`, `Set-Cookie: session=…; HttpOnly; Secure; SameSite=Lax` | 401 | Handled by gateway | Exists only for SSE: `EventSource` can't send an `Authorization` header, but browsers send cookies automatically. Gateway swaps the ID token for a Firebase session cookie (HttpOnly, so JavaScript can't read it; lasts days). Call once right after login. Requires frontend and `/api` on the same origin |
-| 3.2 | `DELETE /api/session` | Cookie | – | `204`, cookie cleared | – | Handled by gateway | Call on logout |
+| 3.1 | `POST /api/session` | Bearer ID token | `{ idToken }` | `204`, `Set-Cookie: session=…; HttpOnly; Secure; SameSite=Lax` | 401 | Auth service | Exists only for SSE: `EventSource` can't send an `Authorization` header, but browsers send cookies automatically. The auth service swaps the ID token for a Firebase session cookie (HttpOnly, so JavaScript can't read it; lasts days). Call once right after login. Caddy routes this without `forward_auth`, since there is no session yet |
+| 3.2 | `DELETE /api/session` | Cookie | – | `204`, cookie cleared | – | Auth service | Call on logout. No `forward_auth` |
 | 3.3 | `GET /api/categories` | Bearer | – | `200 [{ categoryId, name, standardWeightKg }]` | 401 | Pickup | Populates the create form; estimated weight = quantity × standardWeightKg (computed by backend) |
 | 3.4 | `POST /api/requests` | Bearer, role resident | `{ items: [{ categoryId, quantity, description? }], windows: [{ date, startHour }], notes?, safetyAcknowledged: true }` | `201 { requests: [{ requestId, categoryId, quantity, estimatedWeightKg, status: "Open", createdAt, expiresAt }] }` | 400 validation, 401, 403 role | Pickup | One request created per item category, all in one transaction. Pickup address comes from the seeded profile, not the body. `windows`: 1–3 entries, distinct dates, each a one-hour slot (`startHour` 0–23, Calgary time) starting in the future and before `expiresAt`. Photos skipped for Oct 28 |
 | 3.5 | `GET /api/requests?view=mine&status=` | Bearer, role resident | `view=mine` (required), `status` (optional) | `200 [{ requestId, category, quantity, estimatedWeightKg, status, createdAt, expiresAt }]` newest first | 400, 401, 403 | Pickup | Single endpoint with two views. `view=mine` returns only the caller's own requests |
 | 3.6 | `GET /api/requests?view=available&postalCodes=` | Bearer, role volunteer | `view=available` (required), `postalCodes` (optional, comma-separated full 6-char codes, e.g. `T2P1J9,T3A0B1`, max 10) | `200 [{ requestId, category, quantity, estimatedWeightKg, postalCode, windows, expiresAt }]` | 400 invalid or too many codes, 401, 403 | Pickup | Never includes the street address. With `postalCodes`, returns available requests matching any of them; without it, returns all available requests. Codes are normalized (uppercase, spaces removed) before matching. `status` is rejected with this view |
-| 3.7 | `GET /api/events` | Session cookie (`EventSource` with `withCredentials: true`) | – | `200 text/event-stream` (see section 8) | 401 | Notification | Long-lived stream; opened once after login and kept open. Auth is checked when the connection opens |
+| 3.7 | `GET /api/events` | Session cookie (`EventSource` with `withCredentials: true`) | – | `200 text/event-stream` (see section 8) | 401 | Notification | Long-lived stream; opened once after login and kept open. Auth is checked once, by `forward_auth`, when the connection opens |
 | 3.8 | `GET /api/notifications` | Bearer | – | `200 [{ notificationId, type, requestId, title, body, createdAt }]` newest first | 401 | Notification | Loads notifications missed while offline. No read/unread for Oct 28 |
 | 3.9 | `POST /api/push/subscriptions` | Bearer | `{ endpoint, keys: { p256dh, auth } }` | `201` | 400, 401 | Notification | Registers this device for push. `pushManager.subscribe()` returns a unique endpoint URL plus encryption keys for this browser; the backend stores them to know where to send push later |
 | 3.10 | `DELETE /api/push/subscriptions` | Bearer | `{ endpoint }` | `204` | 401 | Notification | Unregisters this device on logout, so the next person using this browser doesn't receive your notifications |
 | 3.11 | `GET /api/profile` | Bearer | – | `200 { uid, publicName, roles, address: { street, city, postalCode }, preferredPostalCodes: [...] }` | 401, 404 no profile | Pickup | Returns only the caller's own profile, so including their address is fine. `preferredPostalCodes` is empty for non-volunteers. The volunteer page uses it to build the default `postalCodes` filter for 3.6. Read-only for Oct 28 (profile editing comes later) |
 
-## 4. Gateway ↔ Firebase Auth (Admin SDK, server side)
+## 4. Auth service ↔ Firebase Auth (Admin SDK, server side)
 
 | # | Call | When | Input | Output | Notes |
 |---|---|---|---|---|---|
-| 4.1 | `verifyIdToken(token, true)` | Every bearer request | ID token | `{ uid, roles }` or failure → 401 | Signature check with cached Google public keys, plus a network call to Firebase that rejects disabled users and tokens revoked via `revokeRefreshTokens(uid)`. Claim changes alone don't revoke tokens |
+| 4.1 | `verifyIdToken(token, true)` | `/verify` request carrying a bearer token | ID token | `{ uid, roles }` or failure → 401 | Signature check with cached Google public keys, plus a network call to Firebase that rejects disabled users and tokens revoked via `revokeRefreshTokens(uid)`. Claim changes alone don't revoke tokens |
 | 4.2 | `createSessionCookie` | `POST /api/session` | ID token, expiry (e.g. 5 days) | Session cookie value | Requires a recent sign-in |
-| 4.3 | `verifySessionCookie(cookie, true)` | `GET /api/events` | Cookie value | `{ uid, roles }` or 401 | Same revocation check as 4.1; only runs when the SSE connection opens |
+| 4.3 | `verifySessionCookie(cookie, true)` | `/verify` request carrying the session cookie (only `GET /api/events`) | Cookie value | `{ uid, roles }` or 401 | Same revocation check as 4.1 |
 
-## 5. Gateway forwarding rules (between frontend and internal services)
+## 5. Caddy gateway rules and `forward_auth`
 
 | # | Item | Rule |
 |---|---|---|
-| 5.1 | Stripped from client | Any incoming `X-User-Id`, `X-User-Roles`, `X-Request-Id` |
-| 5.2 | Added by gateway | `X-User-Id: <uid>`, `X-User-Roles: resident,volunteer`, `X-Request-Id: <uuid>` (for tracing in logs) |
-| 5.3 | Routing | `/api/categories`, `/api/requests`, `/api/profile` → Pickup · `/api/events`, `/api/notifications`, `/api/push/*` → Notification |
-| 5.4 | SSE route (`/api/events`) | The request is forwarded to the notification service as usual. On the way back, the gateway must pass each SSE message from the notification service to the browser immediately: no response buffering and no compression. Proxies normally collect a response before passing it on, but an SSE response never finishes, so buffered messages would get stuck. Also disable the idle timeout (proxies often close quiet connections after ~60 s); the ~25 s heartbeat keeps it alive |
-| 5.5 | Trust | Services are reachable only on the internal network and trust these headers without re-verifying |
+| 5.1 | Strip client headers | Delete any incoming `X-User-Id`, `X-User-Roles`, `X-Request-Id` before anything else |
+| 5.2 | `forward_auth` request | For every `/api/*` route except `/api/session`, Caddy sends `GET /verify` to the auth service with the original `Authorization` and `Cookie` headers (no body). The original request waits |
+| 5.3 | `forward_auth` reply | Auth service checks the bearer token (4.1) if present, otherwise the session cookie (4.3). `200` + response headers `X-User-Id`, `X-User-Roles` → Caddy copies them onto the original request (`copy_headers`). Any other status (e.g. `401`) is returned to the browser as-is and the request goes no further |
+| 5.4 | Added by Caddy | `X-Request-Id` from Caddy's generated request ID, for tracing in logs |
+| 5.5 | Routing | `/api/session` → Auth service (no `forward_auth`) · `/api/categories`, `/api/requests`, `/api/profile` → Pickup · `/api/events`, `/api/notifications`, `/api/push/*` → Notification · everything else → Next.js frontend |
+| 5.6 | SSE route (`/api/events`) | The request goes through `forward_auth` and is proxied as usual. On the way back, Caddy streams `text/event-stream` responses immediately; keep `/api/events` out of any `encode` (compression) rule. The ~25 s heartbeat keeps the connection active |
+| 5.7 | HTTPS | Caddy provisions certificates automatically (a local certificate for `localhost` in development), which the `Secure` session cookie needs |
+| 5.8 | Trust | Only Caddy is exposed publicly. Auth, pickup and notification services are reachable only on the internal network, and the services trust `X-User-*` without re-verifying |
 
 ## 6. Pickup service ↔ Postgres
 
